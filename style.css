@@ -550,3 +550,41 @@ input[type=range]::-webkit-slider-thumb:hover { background: var(--blue-400); tra
     #right-panel.open { transform: translateY(0); }
     #header-badges .badge:not(:first-child) { display: none; }
 }
+
+/* =============================================
+   DRAW MODE SELECTOR
+============================================= */
+.draw-mode-selector {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 8px;
+}
+.mode-btn {
+    flex: 1;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    color: var(--slate-300);
+    padding: 6px;
+    font-family: var(--font);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    transition: var(--transition);
+}
+.mode-btn:hover {
+    background: var(--bg-hover);
+    color: var(--white);
+    border-color: var(--border-glow);
+}
+.mode-btn.active {
+    background: rgba(59, 130, 246, 0.15);
+    border-color: var(--blue-400);
+    color: var(--blue-400);
+    box-shadow: 0 0 8px rgba(59, 130, 246, 0.2);
+}
+

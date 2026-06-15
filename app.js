@@ -54,9 +54,13 @@ map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), '
 // ============================================================
 //  STATE VARIABLES
 // ============================================================
+let drawMode = 'rectangle'; // 'rectangle', 'circle', 'polygon'
 let drawState = 'idle'; // idle, start, drawing, completed
-let cornerA = null;
-let cornerB = null;
+let cornerA = null; // for rectangle
+let cornerB = null; // for rectangle
+let circleCenter = null; // for circle (lng, lat)
+let circleRadius = 0; // for circle (meters)
+let polygonPts = []; // for polygon (array of [lng, lat])
 let aoiAreaM2 = 0;
 
 let allGeojsonData = null; // raw OSM features from Overpass
@@ -248,17 +252,100 @@ window.toggleAccordion = function(contentId, chevronId) {
 // ============================================================
 //  CUSTOM DRAWING TOOL LOGIC
 // ============================================================
+// ============================================================
+//  CUSTOM DRAWING TOOL LOGIC & UTILITIES
+// ============================================================
+window.setDrawMode = function(mode) {
+    if (drawState !== 'idle') {
+        showToast('⚠️ Batalkan/selesaikan penggambaran yang sedang berjalan terlebih dahulu!', 'warning');
+        return;
+    }
+    drawMode = mode;
+    
+    // Update active button states
+    ['rect', 'circle', 'poly'].forEach(m => {
+        const btn = document.getElementById(`mode-${m}-btn`);
+        if (btn) {
+            if (m === (mode === 'rectangle' ? 'rect' : mode === 'circle' ? 'circle' : 'poly')) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        }
+    });
+
+    const statusMap = {
+        'rectangle': 'Gunakan tombol "Mulai Menggambar" lalu klik sudut awal dan sudut akhir di peta.',
+        'circle': 'Gunakan tombol "Mulai Menggambar" lalu klik titik pusat dan geser untuk radius.',
+        'polygon': 'Gunakan tombol "Mulai Menggambar" lalu klik beberapa titik di peta.'
+    };
+    setStatus(statusMap[mode], 'info');
+};
+
+function getDistanceMeters(pt1, pt2) {
+    const R = 6371000; // Earth radius in meters
+    const lat1 = pt1[1] * Math.PI / 180;
+    const lat2 = pt2[1] * Math.PI / 180;
+    const dLat = (pt2[1] - pt1[1]) * Math.PI / 180;
+    const dLon = (pt2[0] - pt1[0]) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1) * Math.cos(lat2) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+}
+
+function createCirclePolygon(center, radiusMeters, points = 64) {
+    const coords = [];
+    const distanceX = radiusMeters / (111320 * Math.cos(center[1] * Math.PI / 180));
+    const distanceY = radiusMeters / 110540;
+
+    for (let i = 0; i < points; i++) {
+        const theta = (i / points) * (2 * Math.PI);
+        const x = distanceX * Math.cos(theta);
+        const y = distanceY * Math.sin(theta);
+        coords.push([center[0] + x, center[1] + y]);
+    }
+    coords.push(coords[0]); // Close polygon
+    return {
+        type: 'Polygon',
+        coordinates: [coords]
+    };
+}
+
+function isPointInPolygon(pt, polygon) {
+    const x = pt[0], y = pt[1];
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const xi = polygon[i][0], yi = polygon[i][1];
+        const xj = polygon[j][0], yj = polygon[j][1];
+        const intersect = ((yi > y) !== (yj > y))
+            && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+    }
+    return inside;
+}
+
 window.toggleAoiDrawing = function() {
     const btn = document.getElementById('draw-aoi-btn');
     if (!btn) return;
+    
     if (drawState === 'idle') {
-        // Start drawing state
         drawState = 'start';
         btn.classList.add('active');
         btn.innerHTML = '<i class="fa fa-stop"></i> Batalkan Gambar';
         map.getCanvas().style.cursor = 'crosshair';
-        setMapInteractions(false); // Disable map drag/pan
-        setStatus('Klik di peta untuk menentukan sudut awal AOI...', 'info');
+        setMapInteractions(false); // Disable map navigation
+        
+        if (drawMode === 'rectangle') {
+            setStatus('Klik di peta untuk menentukan sudut awal kotak AOI...', 'info');
+        } else if (drawMode === 'circle') {
+            setStatus('Klik di peta untuk menentukan titik pusat lingkaran AOI...', 'info');
+        } else if (drawMode === 'polygon') {
+            polygonPts = [];
+            setStatus('Klik di peta untuk menentukan titik sudut pertama poligon AOI...', 'info');
+            document.getElementById('btn-finish-poly').style.display = 'inline-flex';
+        }
         clearAoi();
     } else {
         // Cancel drawing
@@ -273,8 +360,11 @@ function resetDrawingState() {
     const btn = document.getElementById('draw-aoi-btn');
     if (btn) {
         btn.classList.remove('active');
-        btn.innerHTML = '<i class="fa fa-pencil-ruler"></i> Gambar AOI Baru';
+        btn.innerHTML = '<i class="fa fa-pencil-ruler"></i> Mulai Menggambar';
     }
+    const finishBtn = document.getElementById('btn-finish-poly');
+    if (finishBtn) finishBtn.style.display = 'none';
+    
     map.getCanvas().style.cursor = '';
     setMapInteractions(true); // Re-enable map navigation
 }
@@ -297,70 +387,164 @@ function setMapInteractions(enabled) {
     });
 }
 
-// Click handler for drawing AOI on the map
-map.on('click', (e) => {
-    if (drawState === 'start') {
-        // Lock corner A
-        cornerA = [e.lngLat.lng, e.lngLat.lat];
-        drawState = 'drawing';
-        setStatus('Geser mouse lalu klik sekali lagi untuk menyelesaikan AOI...', 'info');
-    } else if (drawState === 'drawing') {
-        // Lock corner B
-        cornerB = [e.lngLat.lng, e.lngLat.lat];
-        drawState = 'completed';
-        
-        // Re-enable navigation
-        resetDrawingState();
-        
-        // Calculate final area and enable run button
-        const areaM2 = calculateRectArea(cornerA, cornerB);
-        aoiAreaM2 = areaM2;
-        const areaKm2 = areaM2 / 1000000;
-        
-        const aoiAreaVal = document.getElementById('aoi-area-val');
-        if (aoiAreaVal) aoiAreaVal.textContent = areaKm2.toFixed(3) + ' km²';
-        updateAoiEstimations(areaKm2);
-        
-        const clearAoiBtn = document.getElementById('btn-clear-aoi');
-        if (clearAoiBtn) clearAoiBtn.style.display = 'block';
-        const runBtn = document.getElementById('btn-run-analysis');
-        if (runBtn) runBtn.disabled = false;
-        
-        setStatus(`AOI Selesai: ${areaKm2.toFixed(3)} km². Klik tombol 'Analisis' untuk memproses.`, 'success');
+window.finishPolygonDrawing = function() {
+    if (drawMode !== 'polygon' || drawState !== 'drawing') return;
+    if (polygonPts.length < 3) {
+        showToast('⚠️ Minimal poligon harus memiliki 3 titik!', 'warning');
+        return;
     }
-});
-
-// Mousemove handler to update rectangle preview in real-time
-map.on('mousemove', (e) => {
-    if (drawState !== 'drawing' || !cornerA) return;
     
-    const currentCoord = [e.lngLat.lng, e.lngLat.lat];
-    const areaM2 = calculateRectArea(cornerA, currentCoord);
+    // Close polygon
+    polygonPts.push([polygonPts[0][0], polygonPts[0][1]]);
+    drawState = 'completed';
+    resetDrawingState();
+    
+    const areaM2 = polygonAreaM2(polygonPts);
+    aoiAreaM2 = areaM2;
     const areaKm2 = areaM2 / 1000000;
     
-    // Update size UI
     const aoiAreaVal = document.getElementById('aoi-area-val');
     if (aoiAreaVal) aoiAreaVal.textContent = areaKm2.toFixed(3) + ' km²';
     updateAoiEstimations(areaKm2);
     
-    const invalid = areaKm2 > 5.0;
-    const coords = [
-        [cornerA[0], cornerA[1]],
-        [currentCoord[0], cornerA[1]],
-        [currentCoord[0], currentCoord[1]],
-        [cornerA[0], currentCoord[1]],
-        [cornerA[0], cornerA[1]]
-    ];
+    const clearAoiBtn = document.getElementById('btn-clear-aoi');
+    if (clearAoiBtn) clearAoiBtn.style.display = 'block';
+    const runBtn = document.getElementById('btn-run-analysis');
+    if (runBtn) runBtn.disabled = false;
     
-    // Update bounding box source
-    if (map.getSource('aoi-source')) {
+    setStatus(`AOI Poligon Selesai: ${areaKm2.toFixed(3)} km². Klik tombol 'Analisis' untuk memproses.`, 'success');
+};
+
+// Map click event during drawing
+map.on('click', (e) => {
+    if (drawState === 'idle') return;
+    
+    const clickCoord = [e.lngLat.lng, e.lngLat.lat];
+    
+    if (drawMode === 'rectangle') {
+        if (drawState === 'start') {
+            cornerA = clickCoord;
+            drawState = 'drawing';
+            setStatus('Geser mouse lalu klik sekali lagi untuk menyelesaikan kotak AOI...', 'info');
+        } else if (drawState === 'drawing') {
+            cornerB = clickCoord;
+            drawState = 'completed';
+            resetDrawingState();
+            
+            const areaM2 = calculateRectArea(cornerA, cornerB);
+            aoiAreaM2 = areaM2;
+            const areaKm2 = areaM2 / 1000000;
+            
+            const aoiAreaVal = document.getElementById('aoi-area-val');
+            if (aoiAreaVal) aoiAreaVal.textContent = areaKm2.toFixed(3) + ' km²';
+            updateAoiEstimations(areaKm2);
+            
+            const clearAoiBtn = document.getElementById('btn-clear-aoi');
+            if (clearAoiBtn) clearAoiBtn.style.display = 'block';
+            const runBtn = document.getElementById('btn-run-analysis');
+            if (runBtn) runBtn.disabled = false;
+            
+            setStatus(`AOI Selesai: ${areaKm2.toFixed(3)} km². Klik tombol 'Analisis' untuk memproses.`, 'success');
+        }
+    } else if (drawMode === 'circle') {
+        if (drawState === 'start') {
+            circleCenter = clickCoord;
+            drawState = 'drawing';
+            setStatus('Geser mouse lalu klik sekali lagi untuk menentukan radius lingkaran...', 'info');
+        } else if (drawState === 'drawing') {
+            const currentCoord = clickCoord;
+            const radiusM = getDistanceMeters(circleCenter, currentCoord);
+            circleRadius = radiusM;
+            drawState = 'completed';
+            resetDrawingState();
+            
+            const areaM2 = Math.PI * radiusM * radiusM;
+            aoiAreaM2 = areaM2;
+            const areaKm2 = areaM2 / 1000000;
+            
+            const aoiAreaVal = document.getElementById('aoi-area-val');
+            if (aoiAreaVal) aoiAreaVal.textContent = areaKm2.toFixed(3) + ' km²';
+            updateAoiEstimations(areaKm2);
+            
+            const clearAoiBtn = document.getElementById('btn-clear-aoi');
+            if (clearAoiBtn) clearAoiBtn.style.display = 'block';
+            const runBtn = document.getElementById('btn-run-analysis');
+            if (runBtn) runBtn.disabled = false;
+            
+            setStatus(`AOI Lingkaran Selesai: ${areaKm2.toFixed(3)} km² (Radius: ${fmt(radiusM)}m). Klik 'Analisis' untuk memproses.`, 'success');
+        }
+    } else if (drawMode === 'polygon') {
+        if (drawState === 'start') {
+            polygonPts.push(clickCoord);
+            drawState = 'drawing';
+            setStatus('Klik titik berikutnya untuk menggambar poligon, atau klik "Selesai"...', 'info');
+        } else if (drawState === 'drawing') {
+            // Check if clicking near the first point to close
+            if (polygonPts.length >= 3) {
+                const distToFirst = getDistanceMeters(clickCoord, polygonPts[0]);
+                if (distToFirst < 15) { // within 15 meters, close it
+                    finishPolygonDrawing();
+                    return;
+                }
+            }
+            polygonPts.push(clickCoord);
+            setStatus(`Poligon: ${polygonPts.length} titik. Klik titik berikutnya, atau klik "Selesai" untuk mengunci.`, 'info');
+        }
+    }
+});
+
+// Map mousemove event during drawing (preview)
+map.on('mousemove', (e) => {
+    if (drawState !== 'drawing') return;
+    
+    const currentCoord = [e.lngLat.lng, e.lngLat.lat];
+    let geometry = null;
+    let areaKm2 = 0;
+    let invalid = false;
+    
+    if (drawMode === 'rectangle' && cornerA) {
+        const areaM2 = calculateRectArea(cornerA, currentCoord);
+        areaKm2 = areaM2 / 1000000;
+        invalid = areaKm2 > 100.0; // new limit 100 km²
+        
+        const coords = [
+            [cornerA[0], cornerA[1]],
+            [currentCoord[0], cornerA[1]],
+            [currentCoord[0], currentCoord[1]],
+            [cornerA[0], currentCoord[1]],
+            [cornerA[0], cornerA[1]]
+        ];
+        geometry = {
+            type: 'Polygon',
+            coordinates: [coords]
+        };
+    } else if (drawMode === 'circle' && circleCenter) {
+        const radiusM = getDistanceMeters(circleCenter, currentCoord);
+        const areaM2 = Math.PI * radiusM * radiusM;
+        areaKm2 = areaM2 / 1000000;
+        invalid = areaKm2 > 100.0;
+        geometry = createCirclePolygon(circleCenter, radiusM);
+    } else if (drawMode === 'polygon' && polygonPts.length > 0) {
+        const tempPts = [...polygonPts, currentCoord, polygonPts[0]];
+        const areaM2 = polygonAreaM2(tempPts);
+        areaKm2 = areaM2 / 1000000;
+        invalid = areaKm2 > 100.0;
+        geometry = {
+            type: 'Polygon',
+            coordinates: [tempPts]
+        };
+    }
+    
+    if (geometry && map.getSource('aoi-source')) {
+        // Update size UI
+        const aoiAreaVal = document.getElementById('aoi-area-val');
+        if (aoiAreaVal) aoiAreaVal.textContent = areaKm2.toFixed(3) + ' km²';
+        updateAoiEstimations(areaKm2);
+        
         map.getSource('aoi-source').setData({
             type: 'Feature',
             properties: { invalid: invalid },
-            geometry: {
-                type: 'Polygon',
-                coordinates: [coords]
-            }
+            geometry: geometry
         });
     }
 });
@@ -387,7 +571,7 @@ function updateAoiEstimations(areaKm2) {
         return;
     }
     
-    // Heuristic estimations
+    // Heuristic estimations for data/time
     let estTime = '—';
     let estSize = '—';
     if (areaKm2 < 0.5) {
@@ -399,18 +583,30 @@ function updateAoiEstimations(areaKm2) {
     } else if (areaKm2 <= 5.0) {
         estTime = '10 - 20 detik';
         estSize = '2 - 6 MB';
+    } else if (areaKm2 <= 20.0) {
+        estTime = '20 - 40 detik';
+        estSize = '6 - 20 MB';
     } else {
-        estTime = '> 30 detik (Sangat Lama)';
-        estSize = '> 6 MB (Berat)';
+        estTime = '> 60 detik (Sangat Lama)';
+        estSize = '> 20 MB (Sangat Berat)';
     }
     
     if (timeEl) timeEl.textContent = estTime;
     if (sizeEl) sizeEl.textContent = estSize;
+
+    // Enable/disable analysis button based on 100km2 limit
+    const runBtn = document.getElementById('btn-run-analysis');
+    if (runBtn && drawState === 'completed') {
+        runBtn.disabled = (areaKm2 > 100.0 || areaKm2 <= 0);
+    }
 }
 
 window.clearAoi = function() {
     cornerA = null;
     cornerB = null;
+    circleCenter = null;
+    circleRadius = 0;
+    polygonPts = [];
     aoiAreaM2 = 0;
     
     const aoiAreaVal = document.getElementById('aoi-area-val');
@@ -454,7 +650,9 @@ function clearBuildingsLayers() {
 //  OVERPASS API FETCH & GEOMETRY PARSER
 // ============================================================
 window.runAnalysis = async function() {
-    if (!cornerA || !cornerB) return;
+    if (drawMode === 'rectangle' && (!cornerA || !cornerB)) return;
+    if (drawMode === 'circle' && (!circleCenter || !circleRadius)) return;
+    if (drawMode === 'polygon' && polygonPts.length < 3) return;
     if (analysisState.active) return;
 
     const runBtn = document.getElementById('btn-run-analysis');
@@ -521,12 +719,31 @@ window.runAnalysis = async function() {
         setAnalysisStage('connect', 'Menyambung ke Overpass API...', 'active');
         updateLoader('Menyambung ke Overpass API...');
 
-        const minLat = Math.min(cornerA[1], cornerB[1]);
-        const minLon = Math.min(cornerA[0], cornerB[0]);
-        const maxLat = Math.max(cornerA[1], cornerB[1]);
-        const maxLon = Math.max(cornerA[0], cornerB[0]);
-
-        const query = `[out:json][timeout:60];\n(\n  way["building"](${minLat},${minLon},${maxLat},${maxLon});\n  relation["building"](${minLat},${minLon},${maxLat},${maxLon});\n);\nout geom;`;
+        // Calculate bounding box and write the Overpass query dynamically
+        let minLat, minLon, maxLat, maxLon, query;
+        if (drawMode === 'rectangle') {
+            minLat = Math.min(cornerA[1], cornerB[1]);
+            minLon = Math.min(cornerA[0], cornerB[0]);
+            maxLat = Math.max(cornerA[1], cornerB[1]);
+            maxLon = Math.max(cornerA[0], cornerB[0]);
+            query = `[out:json][timeout:90];\n(\n  way["building"](${minLat},${minLon},${maxLat},${maxLon});\n  relation["building"](${minLat},${minLon},${maxLat},${maxLon});\n);\nout geom;`;
+        } else if (drawMode === 'circle') {
+            const deltaLat = circleRadius / 110540;
+            const deltaLon = circleRadius / (111320 * Math.cos(circleCenter[1] * Math.PI / 180));
+            minLat = circleCenter[1] - deltaLat;
+            minLon = circleCenter[0] - deltaLon;
+            maxLat = circleCenter[1] + deltaLat;
+            maxLon = circleCenter[0] + deltaLon;
+            query = `[out:json][timeout:90];\n(\n  way["building"](around:${circleRadius},${circleCenter[1]},${circleCenter[0]});\n  relation["building"](around:${circleRadius},${circleCenter[1]},${circleCenter[0]});\n);\nout geom;`;
+        } else if (drawMode === 'polygon') {
+            const lats = polygonPts.map(p => p[1]);
+            const lons = polygonPts.map(p => p[0]);
+            minLat = Math.min(...lats);
+            minLon = Math.min(...lons);
+            maxLat = Math.max(...lats);
+            maxLon = Math.max(...lons);
+            query = `[out:json][timeout:90];\n(\n  way["building"](${minLat},${minLon},${maxLat},${maxLon});\n  relation["building"](${minLat},${minLon},${maxLat},${maxLon});\n);\nout geom;`;
+        }
 
         // Official Overpass interpreter mirrors prioritized first
         const endpoints = [
@@ -575,6 +792,32 @@ window.runAnalysis = async function() {
         updateAnalysisCounts();
 
         const rawGeojson = overpassToGeoJSON(rawResponse);
+        
+        // Client-side clipping for Circle and Polygon modes
+        if (drawMode === 'circle') {
+            rawGeojson.features = rawGeojson.features.filter(f => {
+                if (!f.geometry || !f.geometry.coordinates) return false;
+                let center = [0,0];
+                if (f.geometry.type === 'Polygon') {
+                    center = f.geometry.coordinates[0][0];
+                } else if (f.geometry.type === 'MultiPolygon') {
+                    center = f.geometry.coordinates[0][0][0];
+                }
+                return getDistanceMeters(circleCenter, center) <= circleRadius;
+            });
+        } else if (drawMode === 'polygon') {
+            rawGeojson.features = rawGeojson.features.filter(f => {
+                if (!f.geometry || !f.geometry.coordinates) return false;
+                let center = [0,0];
+                if (f.geometry.type === 'Polygon') {
+                    center = f.geometry.coordinates[0][0];
+                } else if (f.geometry.type === 'MultiPolygon') {
+                    center = f.geometry.coordinates[0][0][0];
+                }
+                return isPointInPolygon(center, polygonPts);
+            });
+        }
+
         const count = rawGeojson.features.length;
         if (count === 0) {
             throw new Error('empty_osm_response');
@@ -1267,7 +1510,12 @@ window.saveCurrentProject = async function() {
     if (!nameInput) return;
     const name = nameInput.value.trim();
     if (!name) { showToast('⚠️ Harap masukkan nama project!', 'error'); return; }
-    if (!allGeojsonData || !cornerA || !cornerB) { showToast('⚠️ Lakukan analisis terlebih dahulu!', 'error'); return; }
+    
+    const hasAoi = (drawMode === 'rectangle' && cornerA && cornerB) || 
+                    (drawMode === 'circle' && circleCenter && circleRadius) || 
+                    (drawMode === 'polygon' && polygonPts.length >= 3);
+                    
+    if (!allGeojsonData || !hasAoi) { showToast('⚠️ Lakukan analisis terlebih dahulu!', 'error'); return; }
     
     const saveBtn = document.getElementById('save-project-btn');
     if (saveBtn) {
@@ -1275,20 +1523,38 @@ window.saveCurrentProject = async function() {
         saveBtn.innerHTML = '<i class="fa fa-circle-notch fa-spin"></i>';
     }
 
-    const aoiGeoJSON = {
-        type: 'Feature',
-        properties: {},
-        geometry: {
-            type: 'Polygon',
-            coordinates: [[
-                [cornerA[0], cornerA[1]],
-                [cornerB[0], cornerA[1]],
-                [cornerB[0], cornerB[1]],
-                [cornerA[0], cornerB[1]],
-                [cornerA[0], cornerA[1]]
-            ]]
-        }
-    };
+    let aoiGeoJSON = null;
+    if (drawMode === 'rectangle') {
+        aoiGeoJSON = {
+            type: 'Feature',
+            properties: { drawMode: 'rectangle' },
+            geometry: {
+                type: 'Polygon',
+                coordinates: [[
+                    [cornerA[0], cornerA[1]],
+                    [cornerB[0], cornerA[1]],
+                    [cornerB[0], cornerB[1]],
+                    [cornerA[0], cornerB[1]],
+                    [cornerA[0], cornerA[1]]
+                ]]
+            }
+        };
+    } else if (drawMode === 'circle') {
+        aoiGeoJSON = {
+            type: 'Feature',
+            properties: { drawMode: 'circle', circleCenter: circleCenter, circleRadius: circleRadius },
+            geometry: createCirclePolygon(circleCenter, circleRadius)
+        };
+    } else if (drawMode === 'polygon') {
+        aoiGeoJSON = {
+            type: 'Feature',
+            properties: { drawMode: 'polygon', polygonPts: polygonPts },
+            geometry: {
+                type: 'Polygon',
+                coordinates: [polygonPts]
+            }
+        };
+    }
 
     const stats = {
         minLevels: parseInt(document.getElementById('sl-min-levels').value),
@@ -1363,12 +1629,27 @@ function loadProject(project) {
     updateParametersUI();
 
     if (project.aoi_geojson && project.aoi_geojson.geometry) {
-        const coords = project.aoi_geojson.geometry.coordinates[0];
-        cornerA = coords[0];
-        cornerB = coords[2];
-        const areaM2 = calculateRectArea(cornerA, cornerB);
-        aoiAreaM2 = areaM2;
-        const areaKm2 = areaM2 / 1000000;
+        const props = project.aoi_geojson.properties || {};
+        const mode = props.drawMode || 'rectangle';
+        
+        // Switch to the correct mode visually
+        setDrawMode(mode);
+        
+        if (mode === 'rectangle' && project.aoi_geojson.geometry.coordinates) {
+            const coords = project.aoi_geojson.geometry.coordinates[0];
+            cornerA = coords[0];
+            cornerB = coords[2];
+            aoiAreaM2 = calculateRectArea(cornerA, cornerB);
+        } else if (mode === 'circle') {
+            circleCenter = props.circleCenter;
+            circleRadius = props.circleRadius;
+            aoiAreaM2 = Math.PI * circleRadius * circleRadius;
+        } else if (mode === 'polygon') {
+            polygonPts = props.polygonPts || project.aoi_geojson.geometry.coordinates[0];
+            aoiAreaM2 = polygonAreaM2(polygonPts);
+        }
+        
+        const areaKm2 = aoiAreaM2 / 1000000;
         
         const aoiAreaVal = document.getElementById('aoi-area-val');
         if (aoiAreaVal) aoiAreaVal.textContent = areaKm2.toFixed(3) + ' km²';
@@ -1377,15 +1658,28 @@ function loadProject(project) {
         const clearBtn = document.getElementById('btn-clear-aoi');
         if (clearBtn) clearBtn.style.display = 'block';
         const runBtn = document.getElementById('btn-run-analysis');
-        if (runBtn) runBtn.disabled = false;
+        if (runBtn) {
+            runBtn.disabled = false;
+            // Force status completed so button enables correctly
+            drawState = 'completed';
+        }
         
         if (map.getSource('aoi-source')) {
             map.getSource('aoi-source').setData(project.aoi_geojson);
         }
         
-        const lons = coords.map(c => c[0]);
-        const lats = coords.map(c => c[1]);
-        fitCameraToAoi(Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats));
+        let lons = [], lats = [];
+        if (project.aoi_geojson.geometry.coordinates) {
+            let pts = project.aoi_geojson.geometry.coordinates[0];
+            if (project.aoi_geojson.geometry.type === 'MultiPolygon') {
+                pts = project.aoi_geojson.geometry.coordinates[0][0];
+            }
+            lons = pts.map(c => c[0]);
+            lats = pts.map(c => c[1]);
+        }
+        if (lons.length > 0) {
+            fitCameraToAoi(Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats));
+        }
     }
 
     if (project.geojson_data) {

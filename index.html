@@ -119,17 +119,37 @@
         <!-- Card 2: AOI Drawing Tool -->
         <div class="glass-card">
             <div class="panel-title"><i class="fa fa-draw-polygon"></i> Area of Interest (AOI)</div>
-            <button id="draw-aoi-btn" onclick="toggleAoiDrawing()">
-                <i class="fa fa-pencil-ruler"></i> Gambar AOI Baru
-            </button>
+            
+            <!-- Drawing Mode Selector -->
+            <div class="draw-mode-selector">
+                <button id="mode-rect-btn" class="mode-btn active" onclick="setDrawMode('rectangle')" title="Mode Kotak (Rectangle)">
+                    <i class="fa fa-vector-square"></i> Kotak
+                </button>
+                <button id="mode-circle-btn" class="mode-btn" onclick="setDrawMode('circle')" title="Mode Lingkaran (Circle)">
+                    <i class="fa fa-circle"></i> Lingkaran
+                </button>
+                <button id="mode-poly-btn" class="mode-btn" onclick="setDrawMode('polygon')" title="Mode Poligon (Polygon)">
+                    <i class="fa fa-draw-polygon"></i> Poligon
+                </button>
+            </div>
+
+            <div style="display:flex;gap:6px;">
+                <button id="draw-aoi-btn" onclick="toggleAoiDrawing()" style="flex:1;">
+                    <i class="fa fa-pencil-ruler"></i> Mulai Menggambar
+                </button>
+                <button id="btn-finish-poly" onclick="finishPolygonDrawing()" style="display:none;flex:1;background:linear-gradient(135deg,var(--blue-600),var(--blue-500));border:none;border-radius:var(--radius-sm);color:white;font-family:var(--font);font-size:12px;font-weight:600;cursor:pointer;transition:var(--transition);" title="Selesaikan Poligon">
+                    <i class="fa fa-flag-checkered"></i> Selesai
+                </button>
+            </div>
+
             <div class="aoi-info">
                 <div class="aoi-info-row"><span>Luas Area:</span><span id="aoi-area-val">—</span></div>
-                <div class="aoi-info-row"><span>Batas Maks:</span><span>5.000 km²</span></div>
+                <div class="aoi-info-row"><span>Batas Maks:</span><span>100,0 km²</span></div>
                 <div class="aoi-info-row"><span>Est. Waktu:</span><span id="aoi-est-time">—</span></div>
                 <div class="aoi-info-row"><span>Est. Output:</span><span id="aoi-est-size">—</span></div>
             </div>
             <div class="warning-banner" id="aoi-warn-banner">
-                ⚠️ Luas area melebih limit! Pengambilan data OSM untuk area &gt; 5.0 km² adalah **operasi berat** dan bisa timeout/lag.
+                ⚠️ Luas area melebihi 5.0 km²! Pengambilan data OSM untuk area besar adalah **operasi sangat berat** dan bisa timeout/lag.
             </div>
             <div class="analysis-summary-grid" style="display:none;">
                 <div class="summary-card"><div class="summary-label">Luas AOI</div><div class="summary-value" id="summary-aoi-area">—</div></div>
